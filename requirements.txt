@@ -4,7 +4,7 @@ torchvision
 yacs
 tensorboardX
 tensorboard
-moviepy
+moviepy==1.0.3
 colorama
 einops
 tqdm
