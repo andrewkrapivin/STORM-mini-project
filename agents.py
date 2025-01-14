@@ -139,6 +139,8 @@ class ActorCriticAgent(nn.Module):
 
             # decode value, calc lambda return
             slow_value = self.slow_value(latent)
+            print(slow_value.shape())
+            input()
             slow_lambda_return = calc_lambda_return(reward, slow_value, termination, self.gamma, self.lambd)
             value = self.symlog_twohot_loss.decode(raw_value)
             lambda_return = calc_lambda_return(reward, value, termination, self.gamma, self.lambd)
