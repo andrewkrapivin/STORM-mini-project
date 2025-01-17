@@ -404,7 +404,7 @@ class WorldModel(nn.Module):
             # dyn-rep loss
             dynamics_loss, dynamics_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
             representation_loss, representation_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
-            total_loss = reconstruction_loss + reward_loss + termination_loss + 0.5*dynamics_loss + 0.1*representation_loss
+            total_loss = 0.2*reconstruction_loss + 5*reward_loss + termination_loss + 0.5*dynamics_loss + 0.1*representation_loss
 
         # gradient descent
         self.scaler.scale(total_loss).backward()
