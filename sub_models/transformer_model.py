@@ -82,12 +82,13 @@ class StochasticTransformerKVCache(nn.Module):
         # self.compileeee()
 
         # action = F.one_hot(action.long(), self.action_dim).float()
-        feats = self.stem(torch.cat([samples, action], dim=-1))
+        feats = self.stem(torch.cat([samples, action], dim=-1)).clone()
         feats = self.position_encoding(feats)
         feats = self.layer_norm(feats)
 
         for layer in self.layer_stack:
             feats, attn = layer(feats, feats, feats, mask)
+            feats = feats.clone()
             # feats = layer(feats, feats, feats, mask)
         # for layer in self.compiled_layers:
         #     feats, attn  = layer(feats, feats, feats, mask)
@@ -114,7 +115,7 @@ class StochasticTransformerKVCache(nn.Module):
         mask = get_vector_mask(self.kv_cache_list[0].shape[1]+1, samples.device)
 
         # action = F.one_hot(action.long(), self.action_dim).float()
-        feats = self.stem(torch.cat([samples, action], dim=-1))
+        feats = self.stem(torch.cat([samples, action], dim=-1)).clone()
         feats = self.position_encoding.forward_with_position(feats, position=self.kv_cache_list[0].shape[1])
         feats = self.layer_norm(feats)
 
@@ -122,6 +123,7 @@ class StochasticTransformerKVCache(nn.Module):
         # for idx, layer in enumerate(self.compiled_layers):
             self.kv_cache_list[idx] = torch.cat([self.kv_cache_list[idx], feats], dim=1)
             feats, attn = layer(feats, self.kv_cache_list[idx], self.kv_cache_list[idx], mask)
+            feats = feats.clone()
             # feats = layer(feats, self.kv_cache_list[idx], self.kv_cache_list[idx], mask)
 
         return feats

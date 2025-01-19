@@ -70,7 +70,7 @@ class MultiHeadAttention(nn.Module):
     
     # @torch.compile(backend="cudagraphs")
     # @torch.compile(backend="onnxrt")
-    @torch.compile(mode="reduce-overhead")
+    # @torch.compile(mode="reduce-overhead")
     def forward(self, q, k, v, mask=None):
         # print("Types: " + str(type(q)) + ", " + str(type(k)) + ", " + str(type(v)) + ", " + str(type(mask)))
         d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
@@ -147,7 +147,7 @@ class AttentionBlockKVCache(nn.Module):
         self.slf_attn = MultiHeadAttention(num_heads, feat_dim, feat_dim//num_heads, feat_dim//num_heads, dropout=dropout)
         self.pos_ffn = PositionwiseFeedForward(feat_dim, hidden_dim, dropout=dropout)
 
-    # @torch.compile(mode="reduce-overhead")
+    @torch.compile(mode="reduce-overhead")
     def forward(self, q, k, v, slf_attn_mask=None):
         output, attn = self.slf_attn(q, k, v, mask=slf_attn_mask)
         # output = self.slf_attn(q, k, v, mask=slf_attn_mask)
