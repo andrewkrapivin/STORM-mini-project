@@ -9,4 +9,5 @@ colorama
 einops
 tqdm
 opencv-python
-gymnasium==0.29.1 "gymnasium[atari,accept-rom-license]"
+gymnasium==0.29.1
+gymnasium[atari,accept-rom-license]

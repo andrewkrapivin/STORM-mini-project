@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
+# import numpy as np
 from einops import rearrange, repeat
 
 
@@ -32,17 +32,20 @@ class ScaledDotProductAttention(nn.Module):
         super().__init__()
         self.temperature = temperature
         self.dropout = nn.Dropout(attn_dropout)
-
+        self.attn_dropout = attn_dropout
+    
     def forward(self, q, k, v, mask=None):
         attn = torch.matmul(q / self.temperature, k.transpose(2, 3))
 
-        if mask is not None:
-            attn = attn.masked_fill(mask == 0, -1e9)
+        # if mask is not None:
+        attn = attn.masked_fill(mask == 0, -1e9)
 
         attn = self.dropout(F.softmax(attn, dim=-1))
         output = torch.matmul(attn, v)
-
         return output, attn
+
+        # output = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.attn_dropout)
+        # return output
 
 
 class MultiHeadAttention(nn.Module):
@@ -64,8 +67,12 @@ class MultiHeadAttention(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
-
+    
+    # @torch.compile(backend="cudagraphs")
+    # @torch.compile(backend="onnxrt")
+    @torch.compile(mode="reduce-overhead")
     def forward(self, q, k, v, mask=None):
+        # print("Types: " + str(type(q)) + ", " + str(type(k)) + ", " + str(type(v)) + ", " + str(type(mask)))
         d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
         sz_b, len_q, len_k, len_v = q.size(0), q.size(1), k.size(1), v.size(1)
 
@@ -80,10 +87,11 @@ class MultiHeadAttention(nn.Module):
         # Transpose for attention dot product: b x n x lq x dv
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
 
-        if mask is not None:
-            mask = mask.unsqueeze(1)   # For head axis broadcasting.
+        # if mask is not None:
+        mask = mask.unsqueeze(1)   # For head axis broadcasting.
 
         q, attn = self.attention(q, k, v, mask=mask)
+        # q = self.attention(q, k, v, mask=mask)
 
         # Transpose to move the head dimension back: b x lq x n x dv
         # Combine the last two dimensions to concatenate all the heads together: b x lq x (n*dv)
@@ -94,6 +102,7 @@ class MultiHeadAttention(nn.Module):
         q = self.layer_norm(q)
 
         return q, attn
+        # return q
 
 
 class PositionwiseFeedForward(nn.Module):
@@ -138,10 +147,13 @@ class AttentionBlockKVCache(nn.Module):
         self.slf_attn = MultiHeadAttention(num_heads, feat_dim, feat_dim//num_heads, feat_dim//num_heads, dropout=dropout)
         self.pos_ffn = PositionwiseFeedForward(feat_dim, hidden_dim, dropout=dropout)
 
+    # @torch.compile(mode="reduce-overhead")
     def forward(self, q, k, v, slf_attn_mask=None):
         output, attn = self.slf_attn(q, k, v, mask=slf_attn_mask)
+        # output = self.slf_attn(q, k, v, mask=slf_attn_mask)
         output = self.pos_ffn(output)
         return output, attn
+        # return output
 
 
 class PositionalEncoding1D(nn.Module):

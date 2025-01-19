@@ -55,6 +55,12 @@ class ReplayBuffer():
 
     @torch.no_grad()
     def sample(self, batch_size, external_batch_size, batch_length, to_device="cuda"):
+        # def test_repeat_batch(xx):
+        #     sample = xx[0:batch_length, 0]
+        #     sample = torch.unsqueeze(sample, 0)
+        #     # print(sample.shape)
+        #     return sample.repeat(batch_size, *[1 for _ in range(len(sample.shape)-1)])
+
         if self.store_on_gpu:
             obs, action, reward, termination = [], [], [], []
             if batch_size > 0:
@@ -72,6 +78,10 @@ class ReplayBuffer():
                 action.append(external_action)
                 reward.append(external_reward)
                 termination.append(external_termination)
+            # obs = [test_repeat_batch(self.obs_buffer)]
+            # action = [test_repeat_batch(self.action_buffer)]
+            # reward = [test_repeat_batch(self.reward_buffer)]
+            # termination = [test_repeat_batch(self.termination_buffer)]
 
             obs = torch.cat(obs, dim=0).float() / 255
             obs = rearrange(obs, "B T H W C -> B T C H W")

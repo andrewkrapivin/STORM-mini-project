@@ -149,7 +149,7 @@ def joint_train_world_model_agent(env_name, max_steps, num_envs, image_size,
             )
         # <<< train world model part
 
-        # train agent part >>>
+        # # train agent part >>>
         if replay_buffer.ready() and total_steps % (train_agent_every_steps//num_envs) == 0 and total_steps*num_envs >= 0:
             if total_steps % (save_every_steps//num_envs) == 0:
                 log_video = True
@@ -167,7 +167,7 @@ def joint_train_world_model_agent(env_name, max_steps, num_envs, image_size,
                 log_video=log_video,
                 logger=logger
             )
-
+            
             agent.update(
                 latent=imagine_latent,
                 action=agent_action,

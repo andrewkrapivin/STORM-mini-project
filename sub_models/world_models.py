@@ -56,6 +56,7 @@ class EncoderBN(nn.Module):
         self.backbone = nn.Sequential(*backbone)
         self.last_channels = channels
 
+    @torch.compile(mode="reduce-overhead")
     def forward(self, x):
         batch_size = x.shape[0]
         x = rearrange(x, "B L C H W -> (B L) C H W")
@@ -108,6 +109,7 @@ class DecoderBN(nn.Module):
         )
         self.backbone = nn.Sequential(*backbone)
 
+    @torch.compile(mode="reduce-overhead")
     def forward(self, sample):
         batch_size = sample.shape[0]
         obs_hat = self.backbone(sample)
@@ -132,12 +134,14 @@ class DistHead(nn.Module):
         logits = torch.log(mixed_probs)
         return logits
 
+    @torch.compile(mode="reduce-overhead")
     def forward_post(self, x):
         logits = self.post_head(x)
         logits = rearrange(logits, "B L (K C) -> B L K C", K=self.stoch_dim)
         logits = self.unimix(logits)
         return logits
 
+    @torch.compile(mode="reduce-overhead")
     def forward_prior(self, x):
         logits = self.prior_head(x)
         logits = rearrange(logits, "B L (K C) -> B L K C", K=self.stoch_dim)
@@ -158,6 +162,7 @@ class RewardDecoder(nn.Module):
         )
         self.head = nn.Linear(transformer_hidden_dim, num_classes)
 
+    @torch.compile(mode="reduce-overhead")
     def forward(self, feat):
         feat = self.backbone(feat)
         reward = self.head(feat)
@@ -180,6 +185,7 @@ class TerminationDecoder(nn.Module):
             # nn.Sigmoid()
         )
 
+    @torch.compile(mode="reduce-overhead")
     def forward(self, feat):
         feat = self.backbone(feat)
         termination = self.head(feat)
@@ -191,6 +197,7 @@ class MSELoss(nn.Module):
     def __init__(self) -> None:
         super().__init__()
 
+    @torch.compile(mode="reduce-overhead")
     def forward(self, obs_hat, obs):
         loss = (obs_hat - obs)**2
         loss = reduce(loss, "B L C H W -> B L", "sum")
@@ -202,6 +209,7 @@ class CategoricalKLDivLossWithFreeBits(nn.Module):
         super().__init__()
         self.free_bits = free_bits
 
+    @torch.compile(mode="reduce-overhead")
     def forward(self, p_logits, q_logits):
         p_dist = OneHotCategorical(logits=p_logits)
         q_dist = OneHotCategorical(logits=q_logits)
@@ -272,7 +280,7 @@ class WorldModel(nn.Module):
 
     def encode_obs(self, obs):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            embedding = self.encoder(obs)
+            embedding = self.encoder(obs).clone()
             post_logits = self.dist_head.forward_post(embedding)
             sample = self.stright_throught_gradient(post_logits, sample_mode="random_sample")
             flattened_sample = self.flatten_sample(sample)
@@ -281,7 +289,7 @@ class WorldModel(nn.Module):
     def calc_last_dist_feat(self, latent, action):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             temporal_mask = get_subsequent_mask(latent)
-            dist_feat = self.storm_transformer(latent, action, temporal_mask)
+            dist_feat = self.storm_transformer(latent, F.one_hot(action.long(), self.storm_transformer.action_dim).float(), temporal_mask)
             last_dist_feat = dist_feat[:, -1:]
             prior_logits = self.dist_head.forward_prior(last_dist_feat)
             prior_sample = self.stright_throught_gradient(prior_logits, sample_mode="random_sample")
@@ -290,7 +298,7 @@ class WorldModel(nn.Module):
 
     def predict_next(self, last_flattened_sample, action, log_video=True):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            dist_feat = self.storm_transformer.forward_with_kv_cache(last_flattened_sample, action)
+            dist_feat = self.storm_transformer.forward_with_kv_cache(last_flattened_sample, F.one_hot(action.long(), self.storm_transformer.action_dim).float())
             prior_logits = self.dist_head.forward_prior(dist_feat)
 
             # decoding
@@ -381,7 +389,7 @@ class WorldModel(nn.Module):
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             # encoding
-            embedding = self.encoder(obs)
+            embedding = self.encoder(obs).clone()
             post_logits = self.dist_head.forward_post(embedding)
             sample = self.stright_throught_gradient(post_logits, sample_mode="random_sample")
             flattened_sample = self.flatten_sample(sample)
@@ -391,7 +399,7 @@ class WorldModel(nn.Module):
 
             # transformer
             temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
-            dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask)
+            dist_feat = self.storm_transformer(flattened_sample, F.one_hot(action.long(), self.storm_transformer.action_dim).float(), temporal_mask)
             prior_logits = self.dist_head.forward_prior(dist_feat)
             # decoding reward and termination with dist_feat
             reward_hat = self.reward_decoder(dist_feat)
@@ -404,7 +412,7 @@ class WorldModel(nn.Module):
             # dyn-rep loss
             dynamics_loss, dynamics_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
             representation_loss, representation_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
-            total_loss = 0.2*reconstruction_loss + 5*reward_loss + termination_loss + 0.5*dynamics_loss + 0.1*representation_loss
+            total_loss = 0.2*reconstruction_loss + reward_loss + termination_loss + 0.5*dynamics_loss + 0.1*representation_loss
 
         # gradient descent
         self.scaler.scale(total_loss).backward()
