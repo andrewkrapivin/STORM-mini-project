@@ -105,6 +105,18 @@ def joint_train_world_model_agent(env_name, max_steps, num_envs, image_size,
                 if len(context_action) == 0:
                     action = vec_env.action_space.sample()
                 else:
+                    # here instead of sampling the agent action, we sample the curiosity module
+                    # Then we also ask the world model to look one step into the future
+                    # To predict the next input, and then the loss is:
+                    # How well does the token the transformer generates predict the 
+                    # Next input to the curiosity module?
+                    # And the input to the curiosity module is a hidden state of the actor
+                    # So basically the idea is, world model should generate the next state
+                    # That is not just correctly predicting the reward, output, and so on
+                    # But also useful for predicting the agent's action following a given action
+                    # If the world model doesn't predict this correctly, then maybe the 
+                    # Action is uncommon
+                    # On second thought, this isn't quite what we want, will need to contemplate more.
                     context_latent = world_model.encode_obs(torch.cat(list(context_obs), dim=1))
                     model_context_action = np.stack(list(context_action), axis=1)
                     model_context_action = torch.Tensor(model_context_action).cuda()

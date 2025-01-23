@@ -45,19 +45,39 @@ class ActorCriticAgent(nn.Module):
 
         self.symlog_twohot_loss = SymLogTwoHotLoss(255, -20, 20)
 
-        actor = [
+        # actor = [
+        #     nn.Linear(feat_dim, hidden_dim, bias=False),
+        #     nn.LayerNorm(hidden_dim),
+        #     nn.ReLU()
+        # ]
+        # for i in range(num_layers - 1):
+        #     actor.extend([
+        #         nn.Linear(hidden_dim, hidden_dim, bias=False),
+        #         nn.LayerNorm(hidden_dim),
+        #         nn.ReLU()
+        #     ])
+        # self.actor = nn.Sequential(
+        #     *actor,
+        #     nn.Linear(hidden_dim, action_dim)
+        # )
+
+        actor_pre = [
             nn.Linear(feat_dim, hidden_dim, bias=False),
             nn.LayerNorm(hidden_dim),
             nn.ReLU()
         ]
         for i in range(num_layers - 1):
-            actor.extend([
+            actor_pre.extend([
                 nn.Linear(hidden_dim, hidden_dim, bias=False),
                 nn.LayerNorm(hidden_dim),
                 nn.ReLU()
             ])
-        self.actor = nn.Sequential(
-            *actor,
+        self.actor_pre = nn.Sequential(*actor_pre)
+        self.actor_post = nn.Sequential(
+            nn.Linear(hidden_dim, action_dim)
+        )
+
+        self.curiosity_module = nn.Sequential(
             nn.Linear(hidden_dim, action_dim)
         )
 
@@ -90,8 +110,13 @@ class ActorCriticAgent(nn.Module):
         for slow_param, param in zip(self.slow_critic.parameters(), self.critic.parameters()):
             slow_param.data.copy_(slow_param.data * decay + param.data * (1 - decay))
 
+    def action_embedding(self, x):
+        return self.actor_pre(x)
+
     def policy(self, x):
-        logits = self.actor(x)
+        embedding = self.actor_pre(x)
+        logits = self.actor_post(embedding)
+        # logits = self.actor(x)
         return logits
 
     def value(self, x):
@@ -106,7 +131,8 @@ class ActorCriticAgent(nn.Module):
         return value
 
     def get_logits_raw_value(self, x):
-        logits = self.actor(x)
+        # logits = self.actor(x)
+        logits = self.policy(x)
         raw_value = self.critic(x)
         return logits, raw_value
 
