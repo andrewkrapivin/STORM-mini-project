@@ -33,7 +33,6 @@ def calc_lambda_return(rewards, values, termination, gamma, lam, dtype=torch.flo
             gamma * inv_termination[:, t] * lam * gamma_return[:, t+1]
     return gamma_return[:, :-1]
 
-
 class ActorCriticAgent(nn.Module):
     def __init__(self, feat_dim, num_layers, hidden_dim, action_dim, gamma, lambd, entropy_coef) -> None:
         super().__init__()
@@ -45,41 +44,37 @@ class ActorCriticAgent(nn.Module):
 
         self.symlog_twohot_loss = SymLogTwoHotLoss(255, -20, 20)
 
-        # actor = [
-        #     nn.Linear(feat_dim, hidden_dim, bias=False),
-        #     nn.LayerNorm(hidden_dim),
-        #     nn.ReLU()
-        # ]
-        # for i in range(num_layers - 1):
-        #     actor.extend([
-        #         nn.Linear(hidden_dim, hidden_dim, bias=False),
-        #         nn.LayerNorm(hidden_dim),
-        #         nn.ReLU()
-        #     ])
-        # self.actor = nn.Sequential(
-        #     *actor,
-        #     nn.Linear(hidden_dim, action_dim)
-        # )
-
-        actor_pre = [
+        actor = [
             nn.Linear(feat_dim, hidden_dim, bias=False),
             nn.LayerNorm(hidden_dim),
             nn.ReLU()
         ]
         for i in range(num_layers - 1):
-            actor_pre.extend([
+            actor.extend([
                 nn.Linear(hidden_dim, hidden_dim, bias=False),
                 nn.LayerNorm(hidden_dim),
                 nn.ReLU()
             ])
-        self.actor_pre = nn.Sequential(*actor_pre)
-        self.actor_post = nn.Sequential(
+        self.actor = nn.Sequential(
+            *actor,
             nn.Linear(hidden_dim, action_dim)
         )
 
-        self.curiosity_module = nn.Sequential(
-            nn.Linear(hidden_dim, action_dim)
-        )
+        # actor_pre = [
+        #     nn.Linear(feat_dim, hidden_dim, bias=False),
+        #     nn.LayerNorm(hidden_dim),
+        #     nn.ReLU()
+        # ]
+        # for i in range(num_layers - 1):
+        #     actor_pre.extend([
+        #         nn.Linear(hidden_dim, hidden_dim, bias=False),
+        #         nn.LayerNorm(hidden_dim),
+        #         nn.ReLU()
+        #     ])
+        # self.actor_pre = nn.Sequential(*actor_pre)
+        # self.actor_post = nn.Sequential(
+        #     nn.Linear(hidden_dim, action_dim)
+        # )
 
         critic = [
             nn.Linear(feat_dim, hidden_dim, bias=False),
@@ -110,13 +105,14 @@ class ActorCriticAgent(nn.Module):
         for slow_param, param in zip(self.slow_critic.parameters(), self.critic.parameters()):
             slow_param.data.copy_(slow_param.data * decay + param.data * (1 - decay))
 
-    def action_embedding(self, x):
-        return self.actor_pre(x)
+    # @torch.no_grad()
+    # def action_embedding(self, x):
+    #     return self.actor_pre(x)
 
     def policy(self, x):
-        embedding = self.actor_pre(x)
-        logits = self.actor_post(embedding)
-        # logits = self.actor(x)
+        # embedding = self.actor_pre(x)
+        # logits = self.actor_post(embedding)
+        logits = self.actor(x)
         return logits
 
     def value(self, x):
@@ -131,8 +127,8 @@ class ActorCriticAgent(nn.Module):
         return value
 
     def get_logits_raw_value(self, x):
-        # logits = self.actor(x)
-        logits = self.policy(x)
+        logits = self.actor(x)
+        # logits = self.policy(x)
         raw_value = self.critic(x)
         return logits, raw_value
 
@@ -201,3 +197,58 @@ class ActorCriticAgent(nn.Module):
             logger.log('ActorCritic/S', S.item())
             logger.log('ActorCritic/norm_ratio', norm_ratio.item())
             logger.log('ActorCritic/total_loss', loss.item())
+
+
+#ok I think its best to just have this be a separate module actually
+# We do simulation I think based on some kind of mixture of the curious actor and the regular actor, but maybe actually just the curious one not sure
+# And I think it makes sense to just have the curious actor try to maximize the probability that the next state
+# Imagined by the world model is just wrong.
+# So basically the idea is that it should take action on the current state to maximize the chance the world model will mispredict the next state
+# In some sense this makes the curious actor an adversary to the world model
+# World model is trying to predict
+# Curious actor is trying to make the world model not predict correctly
+class CuriousActor(nn.Module):
+    def __init__(self, feat_dim, num_layers, hidden_dim, action_dim):
+        self.curiosity_module = nn.Sequential(
+            nn.Linear(hidden_dim, action_dim)
+        )
+
+        actor = [
+            nn.Linear(feat_dim, hidden_dim, bias=False),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU()
+        ]
+        for i in range(num_layers - 1):
+            actor.extend([
+                nn.Linear(hidden_dim, hidden_dim, bias=False),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU()
+            ])
+        self.actor = nn.Sequential(
+            *actor,
+            nn.Linear(hidden_dim, action_dim)
+        )
+
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=3e-5, eps=1e-5)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+
+    @torch.no_grad()
+    def sample(self, latent, greedy=False):
+        self.eval()
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            logits = self.policy(latent)
+            dist = distributions.Categorical(logits=logits)
+            if greedy:
+                action = dist.probs.argmax(dim=-1)
+            else:
+                action = dist.sample()
+        return action
+    
+    def policy(self, x):
+        logits = self.actor(x)
+        return logits
+
+    def update(self, world_model, obs, action, reward, termination):
+        # Will try to fill in tomorrow
+        # tries to maximize the total_loss of the world model
+        # but obviously while doing that runs the world model in eval mode
