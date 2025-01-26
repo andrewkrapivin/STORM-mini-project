@@ -44,9 +44,12 @@ def build_vec_env(env_name, image_size, num_envs, seed):
     return vec_env
 
 
-def train_world_model_step(replay_buffer: ReplayBuffer, world_model: WorldModel, batch_size, demonstration_batch_size, batch_length, logger):
+def train_world_model_step(replay_buffer: ReplayBuffer, world_model: WorldModel, curious_agent: agents.CuriousActor, batch_size, demonstration_batch_size, batch_length, logger):
     obs, action, reward, termination = replay_buffer.sample(batch_size, demonstration_batch_size, batch_length)
     world_model.update(obs, action, reward, termination, logger=logger)
+
+    # we'll just lazily add curiosity update here
+    curious_agent.update(world_model, obs, action, reward, termination)
 
 
 @torch.no_grad()
@@ -76,6 +79,7 @@ def world_model_imagine_data(replay_buffer: ReplayBuffer,
 def joint_train_world_model_agent(env_name, max_steps, num_envs, image_size,
                                   replay_buffer: ReplayBuffer,
                                   world_model: WorldModel, agent: agents.ActorCriticAgent,
+                                  curious_agent: agents.CuriousActor,
                                   train_dynamics_every_steps, train_agent_every_steps,
                                   batch_size, demonstration_batch_size, batch_length,
                                   imagine_batch_size, imagine_demonstration_batch_size,
@@ -97,10 +101,13 @@ def joint_train_world_model_agent(env_name, max_steps, num_envs, image_size,
 
     # sample and train
     for total_steps in tqdm(range(max_steps//num_envs)):
+        mixing_coefficient = total_steps/(max_steps//num_envs)
+
         # sample part >>>
         if replay_buffer.ready():
             world_model.eval()
             agent.eval()
+            curious_agent.eval()
             with torch.no_grad():
                 if len(context_action) == 0:
                     action = vec_env.action_space.sample()
@@ -121,10 +128,15 @@ def joint_train_world_model_agent(env_name, max_steps, num_envs, image_size,
                     model_context_action = np.stack(list(context_action), axis=1)
                     model_context_action = torch.Tensor(model_context_action).cuda()
                     prior_flattened_sample, last_dist_feat = world_model.calc_last_dist_feat(context_latent, model_context_action)
-                    action = agent.sample_as_env_action(
-                        torch.cat([prior_flattened_sample, last_dist_feat], dim=-1),
-                        greedy=False
-                    )
+                    latent = torch.cat([prior_flattened_sample, last_dist_feat], dim=-1)
+                    policy = agent.policy(latent)
+                    curious_policy = curious_agent.policy(latent)
+                    mixture_policy = policy * mixing_coefficient + curious_policy * (1- mixing_coefficient)
+                    action = agents.sample(mixture_policy, use_amp=agent.use_amp)
+                    # action = agent.sample_as_env_action(
+                    #     torch.cat([prior_flattened_sample, last_dist_feat], dim=-1),
+                    #     greedy=False
+                    # )
 
             context_obs.append(rearrange(torch.Tensor(current_obs).cuda(), "B H W C -> B 1 C H W")/255)
             context_action.append(action)
@@ -154,6 +166,7 @@ def joint_train_world_model_agent(env_name, max_steps, num_envs, image_size,
             train_world_model_step(
                 replay_buffer=replay_buffer,
                 world_model=world_model,
+                curious_agent=curious_agent,
                 batch_size=batch_size,
                 demonstration_batch_size=demonstration_batch_size,
                 batch_length=batch_length,
@@ -220,6 +233,18 @@ def build_agent(conf, action_dim):
         entropy_coef=conf.Models.Agent.EntropyCoef,
     ).cuda()
 
+feat_dim, num_layers, hidden_dim, action_dim
+def build_curious_agent(conf, action_dim):
+    return agents.CuriousActor(
+        feat_dim=32*32+conf.Models.WorldModel.TransformerHiddenDim,
+        num_layers=conf.Models.Agent.NumLayers,
+        hidden_dim=conf.Models.Agent.HiddenDim,
+        action_dim=action_dim,
+        # gamma=conf.Models.Agent.Gamma,
+        # lambd=conf.Models.Agent.Lambda,
+        # entropy_coef=conf.Models.Agent.EntropyCoef,
+    ).cuda()
+
 
 if __name__ == "__main__":
     # ignore warnings
@@ -255,6 +280,7 @@ if __name__ == "__main__":
         # build world model and agent
         world_model = build_world_model(conf, action_dim)
         agent = build_agent(conf, action_dim)
+        curious_agent = build_curious_agent(conf, action_dim)
 
         # build replay buffer
         replay_buffer = ReplayBuffer(
@@ -279,6 +305,7 @@ if __name__ == "__main__":
             replay_buffer=replay_buffer,
             world_model=world_model,
             agent=agent,
+            curious_agent=curious_agent,
             train_dynamics_every_steps=conf.JointTrainAgent.TrainDynamicsEverySteps,
             train_agent_every_steps=conf.JointTrainAgent.TrainAgentEverySteps,
             batch_size=conf.JointTrainAgent.BatchSize,

@@ -194,7 +194,8 @@ class MSELoss(nn.Module):
     def forward(self, obs_hat, obs):
         loss = (obs_hat - obs)**2
         loss = reduce(loss, "B L C H W -> B L", "sum")
-        return loss.mean()
+        # return loss.mean()
+        return loss
 
 
 class CategoricalKLDivLossWithFreeBits(nn.Module):
@@ -207,7 +208,8 @@ class CategoricalKLDivLossWithFreeBits(nn.Module):
         q_dist = OneHotCategorical(logits=q_logits)
         kl_div = torch.distributions.kl.kl_divergence(p_dist, q_dist)
         kl_div = reduce(kl_div, "B L D -> B L", "sum")
-        kl_div = kl_div.mean()
+        # doing the mean after does change the behavior but I feel like it actually makes more sense (we'll try it)
+        # kl_div = kl_div.mean()
         real_kl_div = kl_div
         kl_div = torch.max(torch.ones_like(kl_div)*self.free_bits, kl_div)
         return kl_div, real_kl_div
@@ -375,36 +377,52 @@ class WorldModel(nn.Module):
 
         return torch.cat([self.latent_buffer, self.hidden_buffer], dim=-1), self.action_buffer, self.reward_hat_buffer, self.termination_hat_buffer
 
+    def get_total_loss(self, obs, action, reward, termination, logger=None):
+        # encoding
+        embedding = self.encoder(obs)
+        post_logits = self.dist_head.forward_post(embedding)
+        sample = self.stright_throught_gradient(post_logits, sample_mode="random_sample")
+        flattened_sample = self.flatten_sample(sample)
+
+        # decoding image
+        obs_hat = self.image_decoder(flattened_sample)
+
+        # transformer
+        temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
+        dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask)
+        prior_logits = self.dist_head.forward_prior(dist_feat)
+        # decoding reward and termination with dist_feat
+        reward_hat = self.reward_decoder(dist_feat)
+        termination_hat = self.termination_decoder(dist_feat)
+
+        # env loss
+        reconstruction_loss = self.mse_loss_func(obs_hat, obs)
+        reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
+        termination_loss = self.bce_with_logits_loss_func(termination_hat, termination)
+        # dyn-rep loss
+        dynamics_loss, dynamics_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
+        representation_loss, representation_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
+        total_loss = reconstruction_loss + reward_loss + termination_loss + 0.5*dynamics_loss + 0.1*representation_loss
+
+        if logger is not None:
+            logger.log("WorldModel/reconstruction_loss", reconstruction_loss.mean().item())
+            logger.log("WorldModel/reward_loss", reward_loss.mean().item())
+            logger.log("WorldModel/termination_loss", termination_loss.mean().item())
+            logger.log("WorldModel/dynamics_loss", dynamics_loss.mean().item())
+            logger.log("WorldModel/dynamics_real_kl_div", dynamics_real_kl_div.mean().item())
+            logger.log("WorldModel/representation_loss", representation_loss.mean().item())
+            logger.log("WorldModel/representation_real_kl_div", representation_real_kl_div.mean().item())
+            logger.log("WorldModel/total_loss", total_loss.mean().item())
+        
+        return total_loss, torch.cat([flattened_sample, dist_feat], dim=-1)
+
+
     def update(self, obs, action, reward, termination, logger=None):
         self.train()
         batch_size, batch_length = obs.shape[:2]
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            # encoding
-            embedding = self.encoder(obs)
-            post_logits = self.dist_head.forward_post(embedding)
-            sample = self.stright_throught_gradient(post_logits, sample_mode="random_sample")
-            flattened_sample = self.flatten_sample(sample)
-
-            # decoding image
-            obs_hat = self.image_decoder(flattened_sample)
-
-            # transformer
-            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
-            dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask)
-            prior_logits = self.dist_head.forward_prior(dist_feat)
-            # decoding reward and termination with dist_feat
-            reward_hat = self.reward_decoder(dist_feat)
-            termination_hat = self.termination_decoder(dist_feat)
-
-            # env loss
-            reconstruction_loss = self.mse_loss_func(obs_hat, obs)
-            reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
-            termination_loss = self.bce_with_logits_loss_func(termination_hat, termination)
-            # dyn-rep loss
-            dynamics_loss, dynamics_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
-            representation_loss, representation_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
-            total_loss = reconstruction_loss + reward_loss + termination_loss + 0.5*dynamics_loss + 0.1*representation_loss
+            total_loss, _ = get_total_loss(obs, action, reward, termination).mean()
 
         # gradient descent
         self.scaler.scale(total_loss).backward()
@@ -413,13 +431,3 @@ class WorldModel(nn.Module):
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
-
-        if logger is not None:
-            logger.log("WorldModel/reconstruction_loss", reconstruction_loss.item())
-            logger.log("WorldModel/reward_loss", reward_loss.item())
-            logger.log("WorldModel/termination_loss", termination_loss.item())
-            logger.log("WorldModel/dynamics_loss", dynamics_loss.item())
-            logger.log("WorldModel/dynamics_real_kl_div", dynamics_real_kl_div.item())
-            logger.log("WorldModel/representation_loss", representation_loss.item())
-            logger.log("WorldModel/representation_real_kl_div", representation_real_kl_div.item())
-            logger.log("WorldModel/total_loss", total_loss.item())

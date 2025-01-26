@@ -33,6 +33,17 @@ def calc_lambda_return(rewards, values, termination, gamma, lam, dtype=torch.flo
             gamma * inv_termination[:, t] * lam * gamma_return[:, t+1]
     return gamma_return[:, :-1]
 
+
+@torch.no_grad()
+def sample(logits, greedy=False, use_amp=False):
+    with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=use_amp):
+        dist = distributions.Categorical(logits=logits)
+        if greedy:
+            action = dist.probs.argmax(dim=-1)
+        else:
+            action = dist.sample()
+    return action
+
 class ActorCriticAgent(nn.Module):
     def __init__(self, feat_dim, num_layers, hidden_dim, action_dim, gamma, lambd, entropy_coef) -> None:
         super().__init__()
@@ -209,10 +220,6 @@ class ActorCriticAgent(nn.Module):
 # Curious actor is trying to make the world model not predict correctly
 class CuriousActor(nn.Module):
     def __init__(self, feat_dim, num_layers, hidden_dim, action_dim):
-        self.curiosity_module = nn.Sequential(
-            nn.Linear(hidden_dim, action_dim)
-        )
-
         actor = [
             nn.Linear(feat_dim, hidden_dim, bias=False),
             nn.LayerNorm(hidden_dim),
@@ -228,6 +235,9 @@ class CuriousActor(nn.Module):
             *actor,
             nn.Linear(hidden_dim, action_dim)
         )
+
+        self.use_amp = True
+        self.tensor_dtype = torch.bfloat16 if self.use_amp else torch.float32
 
         self.optimizer = torch.optim.Adam(self.parameters(), lr=3e-5, eps=1e-5)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
@@ -252,3 +262,37 @@ class CuriousActor(nn.Module):
         # Will try to fill in tomorrow
         # tries to maximize the total_loss of the world model
         # but obviously while doing that runs the world model in eval mode
+        world_model.eval()
+        total_loss, latents = world_model.get_total_loss(obs, action, reward, termination)
+        # we will take all but last action, since this forms actions
+        action = action[:, :-1]
+        latents = latents[:, :-1]
+
+        # now we predict the action that leads to lowest prediction accuracy
+        logits, raw_value = self.get_logits_raw_value(latent)
+        dist = distributions.Categorical(logits=logits[:, :-1])
+        log_prob = dist.log_prob(action)
+        # Should we try to minimize curiosity entropy? But I feel like curiosity should have a bit of randomness
+        # entropy = dist.entropy()
+
+        # take all but first loss, since this forms prediction accuracy
+        total_loss = total_loss[:, 1:]
+
+        # this approach might not work, but let's just try it before giving up on it
+        # Basically it suffers from being inneficient as it bypasses the whole benefit of training agent using world model
+        # But still let's try it
+        # So we're going to just grab the sample (have total_loss return not just loss but z and h)
+        # And then we're just going to compare the distribution of actions again the real actions taken
+        # and try to maximize world model loss
+        
+        #And here we try to maximize total loss!
+        total_loss = -(total_loss * log_prob)
+        total_loss = total_loss.mean()
+
+        # gradient descent
+        self.scaler.scale(total_loss).backward()
+        self.scaler.unscale_(self.optimizer)  # for clip grad
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=100.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)

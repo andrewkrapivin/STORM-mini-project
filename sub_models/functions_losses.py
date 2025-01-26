@@ -49,7 +49,8 @@ class SymLogTwoHotLoss(nn.Module):
 
         loss = -target_prob * F.log_softmax(output, dim=-1)
         loss = loss.sum(dim=-1)
-        return loss.mean()
+        # return loss.mean()
+        return loss
 
     def decode(self, output):
         return symexp(F.softmax(output, dim=-1) @ self.bins)
