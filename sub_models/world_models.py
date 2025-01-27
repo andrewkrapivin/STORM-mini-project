@@ -378,11 +378,14 @@ class WorldModel(nn.Module):
         return torch.cat([self.latent_buffer, self.hidden_buffer], dim=-1), self.action_buffer, self.reward_hat_buffer, self.termination_hat_buffer
 
     def get_total_loss(self, obs, action, reward, termination, logger=None):
+        batch_size, batch_length = obs.shape[:2]
+
         # encoding
         embedding = self.encoder(obs)
         post_logits = self.dist_head.forward_post(embedding)
         sample = self.stright_throught_gradient(post_logits, sample_mode="random_sample")
         flattened_sample = self.flatten_sample(sample)
+        # print(flattened_sample.shape)
 
         # decoding image
         obs_hat = self.image_decoder(flattened_sample)
@@ -402,7 +405,9 @@ class WorldModel(nn.Module):
         # dyn-rep loss
         dynamics_loss, dynamics_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
         representation_loss, representation_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
-        total_loss = reconstruction_loss + reward_loss + termination_loss + 0.5*dynamics_loss + 0.1*representation_loss
+        # total_loss = reconstruction_loss + reward_loss + termination_loss + 0.5*dynamics_loss + 0.1*representation_loss
+        immediate_loss = reconstruction_loss + reward_loss + termination_loss
+        dist_loss = 0.5*dynamics_loss + 0.1*representation_loss
 
         if logger is not None:
             logger.log("WorldModel/reconstruction_loss", reconstruction_loss.mean().item())
@@ -414,15 +419,15 @@ class WorldModel(nn.Module):
             logger.log("WorldModel/representation_real_kl_div", representation_real_kl_div.mean().item())
             logger.log("WorldModel/total_loss", total_loss.mean().item())
         
-        return total_loss, torch.cat([flattened_sample, dist_feat], dim=-1)
+        return immediate_loss, dist_loss, torch.cat([flattened_sample, dist_feat], dim=-1)
 
 
     def update(self, obs, action, reward, termination, logger=None):
         self.train()
-        batch_size, batch_length = obs.shape[:2]
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            total_loss, _ = get_total_loss(obs, action, reward, termination).mean()
+            immediate_loss, dist_loss, _ = self.get_total_loss(obs, action, reward, termination)
+            total_loss = immediate_loss.mean() + dist_loss.mean()
 
         # gradient descent
         self.scaler.scale(total_loss).backward()

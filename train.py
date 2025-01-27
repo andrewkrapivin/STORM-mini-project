@@ -132,7 +132,7 @@ def joint_train_world_model_agent(env_name, max_steps, num_envs, image_size,
                     policy = agent.policy(latent)
                     curious_policy = curious_agent.policy(latent)
                     mixture_policy = policy * mixing_coefficient + curious_policy * (1- mixing_coefficient)
-                    action = agents.sample(mixture_policy, use_amp=agent.use_amp)
+                    action = agents.sample_as_env_action(mixture_policy, use_amp=agent.use_amp)
                     # action = agent.sample_as_env_action(
                     #     torch.cat([prior_flattened_sample, last_dist_feat], dim=-1),
                     #     greedy=False
@@ -233,7 +233,6 @@ def build_agent(conf, action_dim):
         entropy_coef=conf.Models.Agent.EntropyCoef,
     ).cuda()
 
-feat_dim, num_layers, hidden_dim, action_dim
 def build_curious_agent(conf, action_dim):
     return agents.CuriousActor(
         feat_dim=32*32+conf.Models.WorldModel.TransformerHiddenDim,

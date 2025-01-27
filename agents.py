@@ -44,6 +44,10 @@ def sample(logits, greedy=False, use_amp=False):
             action = dist.sample()
     return action
 
+def sample_as_env_action(logits, greedy=False, use_amp = False):
+    action = sample(logits, greedy, use_amp)
+    return action.detach().cpu().squeeze(-1).numpy()
+
 class ActorCriticAgent(nn.Module):
     def __init__(self, feat_dim, num_layers, hidden_dim, action_dim, gamma, lambd, entropy_coef) -> None:
         super().__init__()
@@ -177,8 +181,8 @@ class ActorCriticAgent(nn.Module):
             lambda_return = calc_lambda_return(reward, value, termination, self.gamma, self.lambd)
 
             # update value function with slow critic regularization
-            value_loss = self.symlog_twohot_loss(raw_value[:, :-1], lambda_return.detach())
-            slow_value_regularization_loss = self.symlog_twohot_loss(raw_value[:, :-1], slow_lambda_return.detach())
+            value_loss = self.symlog_twohot_loss(raw_value[:, :-1], lambda_return.detach()).mean()
+            slow_value_regularization_loss = self.symlog_twohot_loss(raw_value[:, :-1], slow_lambda_return.detach()).mean()
 
             lower_bound = self.lowerbound_ema(percentile(lambda_return, 0.05))
             upper_bound = self.upperbound_ema(percentile(lambda_return, 0.95))
@@ -188,6 +192,8 @@ class ActorCriticAgent(nn.Module):
             policy_loss = -(log_prob * norm_advantage.detach()).mean()
 
             entropy_loss = entropy.mean()
+
+            # print(policy_loss.shape, value_loss.shape, slow_value_regularization_loss.shape, entropy_loss.shape)
 
             loss = policy_loss + value_loss + slow_value_regularization_loss - self.entropy_coef * entropy_loss
 
@@ -220,6 +226,8 @@ class ActorCriticAgent(nn.Module):
 # Curious actor is trying to make the world model not predict correctly
 class CuriousActor(nn.Module):
     def __init__(self, feat_dim, num_layers, hidden_dim, action_dim):
+        super().__init__()
+
         actor = [
             nn.Linear(feat_dim, hidden_dim, bias=False),
             nn.LayerNorm(hidden_dim),
@@ -263,20 +271,20 @@ class CuriousActor(nn.Module):
         # tries to maximize the total_loss of the world model
         # but obviously while doing that runs the world model in eval mode
         world_model.eval()
-        total_loss, latents = world_model.get_total_loss(obs, action, reward, termination)
+        immediate_loss, dist_loss, latents = world_model.get_total_loss(obs, action, reward, termination)
         # we will take all but last action, since this forms actions
         action = action[:, :-1]
         latents = latents[:, :-1]
 
         # now we predict the action that leads to lowest prediction accuracy
-        logits, raw_value = self.get_logits_raw_value(latent)
-        dist = distributions.Categorical(logits=logits[:, :-1])
+        logits = self.policy(latents)
+        dist = distributions.Categorical(logits=logits)
         log_prob = dist.log_prob(action)
         # Should we try to minimize curiosity entropy? But I feel like curiosity should have a bit of randomness
         # entropy = dist.entropy()
 
         # take all but first loss, since this forms prediction accuracy
-        total_loss = total_loss[:, 1:]
+        immediate_loss = immediate_loss[:, 1:]
 
         # this approach might not work, but let's just try it before giving up on it
         # Basically it suffers from being inneficient as it bypasses the whole benefit of training agent using world model
@@ -286,6 +294,9 @@ class CuriousActor(nn.Module):
         # and try to maximize world model loss
         
         #And here we try to maximize total loss!
+        total_loss = immediate_loss+dist_loss
+        # print(total_loss.shape, log_prob.shape)
+        # assert(False)
         total_loss = -(total_loss * log_prob)
         total_loss = total_loss.mean()
 
